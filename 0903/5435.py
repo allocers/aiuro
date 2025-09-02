@@ -3,8 +3,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LogisticRegression
-
+from sklearn.linear_model import LogisticRegression, LinearRegression
+from sklearn.ensemble import RandomForestRegressor
 from scipy.stats import norm
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score
@@ -32,7 +32,7 @@ print("結合・標準化後のデータフレームの上位5行:")
 print(df.head())
 
 
-print(df.info())
+# print(df.info())
 # RangeIndex: 2000 entries, 0 to 1999
 # Data columns (total 20 columns):
 
@@ -101,7 +101,7 @@ plt.title('Correlation Matrix of Covariates', fontsize=16)
 # 画像として保存
 plt.savefig('correlation_matrix.png')
 print("共変量間の相関ヒートマップを 'correlation_matrix.png' として保存しました。")
-plt.show()
+# plt.show()
 
 # # Standardize the specified columns
 scaler = StandardScaler()
@@ -228,7 +228,7 @@ sns.histplot(data=df, x='ps_oof', hue='t', bins=30, stat='density', element='ste
 plt.title('Propensity Score Distribution (OOF, unclipped)')
 plt.xlabel('Propensity score')
 plt.ylabel('Density')
-plt.tight_layout()
+# plt.tight_layout()
 plt.savefig('ps_distribution_unclipped.png', dpi=200)
 plt.close()
 print("傾向スコア分布（unclipped）を 'ps_distribution_unclipped.png' に保存しました。")
@@ -240,7 +240,7 @@ sns.histplot(data=df, x='ps_oof_clip', hue='t', bins=30, stat='density', element
 plt.title(f'Propensity Score Distribution (OOF, clipped at {thr})')
 plt.xlabel('Propensity score (clipped)')
 plt.ylabel('Density')
-plt.tight_layout()
+# plt.tight_layout()
 plt.savefig('ps_distribution_clipped.png', dpi=200)
 plt.close()
 print("傾向スコア分布（clipped）を 'ps_distribution_clipped.png' に保存しました。")
@@ -292,3 +292,269 @@ print("[fold別ATE] mean={:.4f}, 95% range=({:.4f}, {:.4f})".format(ate_mean, ci
 
 
 
+
+# --- RORRの10-fold CV実装 ---
+def crossval_rorr(df, covariates, t_name='t', y_name='y', n_splits=10, random_state=42):
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    thetas = []
+
+    X = df[covariates].values
+    T = df[t_name].values.reshape(-1, 1)
+    Y = df[y_name].values.reshape(-1, 1)
+
+    for fold, (tr_idx, te_idx) in enumerate(skf.split(X, df[t_name]), 1):
+        # 訓練データ
+        X_tr, T_tr, Y_tr = X[tr_idx], T[tr_idx], Y[tr_idx]
+        # テストデータ
+        X_te, T_te, Y_te = X[te_idx], T[te_idx], Y[te_idx]
+
+        # 1) 処置モデル h_hat
+        model_t = LogisticRegression(max_iter=1000, solver='lbfgs')
+        model_t.fit(X_tr, T_tr.ravel())
+        h_hat_te = model_t.predict_proba(X_te)[:, 1].reshape(-1, 1)
+
+        # 2) 結果モデル g_hat (ランダムフォレスト回帰)
+        model_y = RandomForestRegressor(
+            n_estimators=200,
+            max_depth=None,
+            random_state=random_state,
+            n_jobs=-1
+        )
+        model_y.fit(X_tr, Y_tr.ravel())
+        g_hat_te = model_y.predict(X_te).reshape(-1, 1)
+
+        # 残差
+        T_e = T_te - h_hat_te
+        Y_e = Y_te - g_hat_te
+
+        # 3) 残差間の回帰（OLS）
+        ols = LinearRegression()
+        ols.fit(T_e, Y_e)
+        theta_hat = ols.coef_[0][0]
+        thetas.append(theta_hat)
+        print(f"[Fold {fold}] RORR θ = {theta_hat:.4f}")
+
+    thetas = np.array(thetas)
+    mean_theta = np.mean(thetas)
+    std_theta = np.std(thetas, ddof=1)
+    # 95% CI
+    z = norm.ppf(0.975)
+    ci = (mean_theta - z * std_theta / np.sqrt(n_splits),
+          mean_theta + z * std_theta / np.sqrt(n_splits))
+
+    print(f"RORR θ (mean ± std) = {mean_theta:.4f} ± {std_theta:.4f}")
+    print(f"RORR 95% CI ≈ ({ci[0]:.4f}, {ci[1]:.4f})")
+
+    return thetas, (mean_theta, std_theta, ci)
+
+# --- スクリプト末尾で実行 --- 
+thetas, (mean_theta, std_theta, ci) = crossval_rorr(df, covariate_cols, t_name='t', y_name='y', n_splits=10, random_state=42)
+# --- RORRの標準的な10-fold CV実装（改善案） ---
+def crossval_rorr_standard(df, covariates, t_name='t', y_name='y', n_splits=10, random_state=42):
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+
+    X = df[covariates].values
+    T = df[t_name].values
+    Y = df[y_name].values
+
+    # サンプル外（OOF）の残差を格納するための配列を初期化
+    y_residuals_oof = np.zeros_like(Y, dtype=float)
+    t_residuals_oof = np.zeros_like(T, dtype=float)
+
+    print("--- 標準的なRORR（クロスフィッティング）を開始します ---")
+    for fold, (tr_idx, te_idx) in enumerate(skf.split(X, T), 1):
+        # 訓練データとテストデータに分割
+        X_tr, X_te = X[tr_idx], X[te_idx]
+        T_tr, T_te = T[tr_idx], T[te_idx]
+        Y_tr, Y_te = Y[tr_idx], Y[te_idx]
+
+        # 1) 処置モデル h(X) = E[T|X]
+        #    今回は介入tが0/1なのでロジスティック回帰
+        model_t = LogisticRegression(max_iter=1000, solver='lbfgs')
+        model_t.fit(X_tr, T_tr)
+        t_hat_te = model_t.predict_proba(X_te)[:, 1]
+
+        # 2) 結果モデル g(X) = E[Y|X]
+        model_y = RandomForestRegressor(n_estimators=100, random_state=random_state, n_jobs=-1)
+        model_y.fit(X_tr, Y_tr)
+        y_hat_te = model_y.predict(X_te)
+        
+        # テストデータのインデックスを使って、OOF残差を格納
+        t_residuals_oof[te_idx] = T_te - t_hat_te
+        y_residuals_oof[te_idx] = Y_te - y_hat_te
+        
+        print(f"[Fold {fold:02d}] 残差を計算しました。")
+
+    print("\n--- 全データの残差を使って最終的な回帰分析を行います ---")
+    
+    # 3) 全データの残差を使って一度だけ回帰
+    # statsmodelsを使うと信頼区間やp値も簡単に出力できる
+    X_final = sm.add_constant(t_residuals_oof)
+    model_final = sm.OLS(y_residuals_oof, X_final)
+    results = model_final.fit()
+
+    theta_hat = results.params[1]
+    # conf_int = results.conf_int().loc[t_name]
+    conf_int = results.conf_int()[1]
+    p_value = results.pvalues[1]
+
+    print(f"\nRORRによる因果効果の推定値 (θ): {theta_hat:.4f}")
+    print(f"95%信頼区間: ({conf_int[0]:.4f}, {conf_int[1]:.4f})")
+    print(f"p値: {p_value:.4g}")
+    
+    return theta_hat, results
+
+# --- スクリプトの末尾で実行 ---
+# dfとcovariate_colsは定義済みとする
+crossval_rorr_standard(df, covariate_cols, t_name='t', y_name='y')
+
+
+
+# --- Coarsened AIPW for binary treatment (0/1), 10-fold CV ---
+def crossval_coarsened_aipw_binary(df, covariates, t_name='t', y_name='y', n_splits=10, random_state=42):
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    ate_estimates = []
+
+    X = df[covariates].values
+    T = df[t_name].values
+    Y = df[y_name].values
+
+    for fold, (tr_idx, te_idx) in enumerate(skf.split(X, T), 1):
+        X_tr, T_tr, Y_tr = X[tr_idx], T[tr_idx], Y[tr_idx]
+        X_te, T_te, Y_te = X[te_idx], T[te_idx], Y[te_idx]
+
+        # 1) 傾向モデル p_k(X) for k=0,1
+        model_ps = LogisticRegression(max_iter=1000, solver='lbfgs')
+        model_ps.fit(X_tr, T_tr)
+        ps0_te = 1 - model_ps.predict_proba(X_te)[:, 1]
+        ps1_te = model_ps.predict_proba(X_te)[:, 1]
+
+        # 2) 結果モデル m_k(X)
+        model_y0 = RandomForestRegressor(n_estimators=100, random_state=random_state, n_jobs=-1)
+        model_y1 = RandomForestRegressor(n_estimators=100, random_state=random_state, n_jobs=-1)
+        model_y0.fit(X_tr[T_tr == 0], Y_tr[T_tr == 0])
+        model_y1.fit(X_tr[T_tr == 1], Y_tr[T_tr == 1])
+
+        m0_te = model_y0.predict(X_te)
+        m1_te = model_y1.predict(X_te)
+
+        # 3) AIPW estimates per individual
+        aipw0 = ((T_te == 0) * (Y_te - m0_te) / ps0_te) + m0_te
+        aipw1 = ((T_te == 1) * (Y_te - m1_te) / ps1_te) + m1_te
+
+        # Bin-level means (marginal potential outcomes)
+        psi0 = np.mean(aipw0)
+        psi1 = np.mean(aipw1)
+
+        ate = psi1 - psi0
+        ate_estimates.append(ate)
+        print(f"[Fold {fold}] AIPW binary ate = {ate:.4f}")
+
+    ate_estimates = np.array(ate_estimates)
+    mean_ate = np.mean(ate_estimates)
+    std_ate = np.std(ate_estimates, ddof=1)
+    z = norm.ppf(0.975)
+    ci = (mean_ate - z * std_ate / np.sqrt(n_splits),
+          mean_ate + z * std_ate / np.sqrt(n_splits))
+
+    print(f"Coarsened AIPW binary ATE (mean ± sd) = {mean_ate:.4f} ± {std_ate:.4f}")
+    print(f"95% CI ≈ ({ci[0]:.4f}, {ci[1]:.4f})")
+
+    return ate_estimates, (mean_ate, std_ate, ci)
+
+ate_folds, (mean_ate, std_ate, ci_ate) = crossval_coarsened_aipw_binary(
+    df,
+    covariate_cols,
+    t_name='t',
+    y_name='y',
+    n_splits=10,
+    random_state=42
+)
+
+
+def crossval_aipw(df, covariates, t_name='t', y_name='y', n_splits=10, random_state=42):
+    """
+    10-fold Cross-Validation for Coarsened AIPW Estimator.
+    For binary treatment, this estimates the Average Treatment Effect (ATE).
+    """
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+
+    X = df[covariates].values
+    T = df[t_name].values
+    Y = df[y_name].values
+
+    # OOF (Out-of-Fold) predictions for nuisance parameters
+    propensity_scores_oof = np.zeros_like(T, dtype=float) # P(T=1|X)
+    outcome_model_0_oof = np.zeros_like(Y, dtype=float) # E[Y|T=0, X]
+    outcome_model_1_oof = np.zeros_like(Y, dtype=float) # E[Y|T=1, X]
+
+    print("--- AIPW (クロスフィッティング) を開始します ---")
+    for fold, (tr_idx, te_idx) in enumerate(skf.split(X, T), 1):
+        # Split data
+        X_tr, X_te = X[tr_idx], X[te_idx]
+        T_tr, T_te = T[tr_idx], T[te_idx]
+        Y_tr, Y_te = Y[tr_idx], Y[te_idx]
+
+        # 1. Propensity Score Model: P(T=1|X)
+        # Train on training data
+        model_t = LogisticRegression(max_iter=1000, solver='lbfgs', random_state=random_state)
+        model_t.fit(X_tr, T_tr)
+        # Predict on test data (OOF)
+        propensity_scores_te = model_t.predict_proba(X_te)[:, 1]
+        propensity_scores_oof[te_idx] = propensity_scores_te
+
+        # 2. Outcome Models: E[Y|T, X]
+        # Separate models for control and treatment groups
+        
+        # Control group model: E[Y|T=0, X]
+        model_y0 = RandomForestRegressor(n_estimators=100, random_state=random_state, n_jobs=-1)
+        model_y0.fit(X_tr[T_tr == 0], Y_tr[T_tr == 0])
+        outcome_model_0_oof[te_idx] = model_y0.predict(X_te)
+        
+        # Treatment group model: E[Y|T=1, X]
+        model_y1 = RandomForestRegressor(n_estimators=100, random_state=random_state, n_jobs=-1)
+        model_y1.fit(X_tr[T_tr == 1], Y_tr[T_tr == 1])
+        outcome_model_1_oof[te_idx] = model_y1.predict(X_te)
+        
+        print(f"[Fold {fold:02d}] 傾向スコアモデルと結果モデルのOOF予測を計算しました。")
+
+    print("\n--- 全データのOOF予測値を使って最終的なATEを計算します ---")
+
+    # Clip propensity scores to avoid extreme weights
+    ps = np.clip(propensity_scores_oof, 0.01, 0.99)
+    m0 = outcome_model_0_oof
+    m1 = outcome_model_1_oof
+
+    # Calculate counterfactual means (psi_0 and psi_1) using the AIPW formula
+    # psi_1 for the treatment group (T=1)
+    psi_1 = np.mean( (T / ps) * (Y - m1) + m1 )
+    
+    # psi_0 for the control group (T=0)
+    psi_0 = np.mean( ((1 - T) / (1 - ps)) * (Y - m0) + m0 )
+
+    # ATE is the difference between the counterfactual means
+    ate_estimate = psi_1 - psi_0
+
+    # Calculate standard error using influence functions for statistical inference
+    if_1 = (T / ps) * (Y - m1) + m1 - psi_1
+    if_0 = ((1 - T) / (1 - ps)) * (Y - m0) + m0 - psi_0
+    influence_function = if_1 - if_0
+    
+    n_samples = len(df)
+    se = np.sqrt(np.var(influence_function, ddof=1) / n_samples)
+    
+    # Calculate 95% CI and p-value
+    z_score = ate_estimate / se
+    p_value = 2 * (1 - norm.cdf(abs(z_score)))
+    ci_lower = ate_estimate - 1.96 * se
+    ci_upper = ate_estimate + 1.96 * se
+
+    print(f"\nAIPWによる因果効果の推定値 (ATE): {ate_estimate:.4f}")
+    print(f"95%信頼区間: ({ci_lower:.4f}, {ci_upper:.4f})")
+    print(f"p値: {p_value:.4g}")
+
+    return ate_estimate, se
+
+# # スクリプトの末尾で実行
+# # dfとcovariate_colsは定義済みと仮定
+crossval_aipw(df, covariate_cols, t_name='t', y_name='y')
