@@ -25,8 +25,7 @@ def simulate_dataset_dummy(N, num_cov, num_strata, seed):
     df['plm_plim'] = 0.1 # RORR target
     df['incremental'] = 0.05 # AIE target
     return df
-warnings.filterwarnings("ignore")
-# Replace with actual modules if available
+
 try:
     import estimators_2 as est2
     import data_multi as data
@@ -35,12 +34,15 @@ except ImportError:
     est2 = type('est', (), {'get_rorr_estimates': get_rorr_estimates_dummy, 'estimate_aipw_matrix': estimate_aipw_matrix_dummy})
     data = type('data', (), {'simulate_dataset': simulate_dataset_dummy, 'NUM_COVARIATES': 5})
 
-# --- 1. データ読み込み ---
-# この部分を実際のデータ読み込みに置き換えてください。
-# 例: df = pd.read_csv('your_data.csv')
+# Warningsを無視
+warnings.filterwarnings("ignore")
 
-# 以下は、コードがすぐに実行できるようにするためのダミーデータです。
-# 実際のデータを使う際は、この部分をコメントアウトまたは削除してください。
+# # --- 1. データ読み込み ---
+# print("--- Creating Dummy Data for Demonstration ---")
+# N = 10000 
+# num_cov = 3
+# num_strata = 5
+# df = est2.simulate_dataset(N=N, num_cov=num_cov, num_strata=num_strata, seed=42)
 print("--- Creating Dummy Data for Demonstration ---")
 N = 10000  # サンプルサイズ
 dummy_data = {
@@ -57,77 +59,32 @@ print(df.head())
 
 # --- 2. 変数定義 ---
 # 共変量（特徴量）のカラム名を指定
+# covariate_cols = [f'x{i+1}' for i in range(num_cov)]
+
 covariate_cols = ['x1', 'x2', 'x3']
-N = len(df) # サンプルサイズをデータから取得
+N = len(df) 
 
 # --- 3. RORR (Ratio of Ratios) 推定 ---
 print("\n--- Running RORR Estimation ---")
-# # アウトカムモデル y ~ x1 + x2 + x3
-# g_model = RandomForestRegressor(n_estimators=50, random_state=42).fit(df[covariate_cols], df['y'])
-# # 介入モデル t ~ x1 + x2 + x3
-# h_model = LinearRegression().fit(df[covariate_cols], df['t'])
+# アウトカムモデル y ~ x1 + x2 + x3
+g_model = RandomForestRegressor(n_estimators=50, random_state=42).fit(df[covariate_cols], df['y'])
+# 介入モデル t ~ x1 + x2 + x3
+h_model = LogisticRegression(max_iter=1000).fit(df[covariate_cols], df['t'])
 
-# # RORRの推定値を計算
-# coef, se, ci = est2.get_rorr_estimates(df, g_model, h_model)
-
-# # 結果の表示（Target列は削除）
-# results_rorr = [[N, coef, f"({ci[0]:.3f}, {ci[1]:.3f})"]]
-# columns_rorr = ["Sample Size", "Empirical RORR", "RORR CI"]
-# df_rorr = pd.DataFrame(results_rorr, columns=columns_rorr)
-# print(df_rorr)
-from sklearn.model_selection import KFold
-import pandas as pd
-import numpy as np
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import LinearRegression
-
-print("\n--- Running RORR Estimation with 10-Fold Cross-Validation ---")
-
-# 10分割交差検証の設定
-kf = KFold(n_splits=10, shuffle=True, random_state=42)
-
-# 結果を保存するためのリスト
-rorr_coefs = []
-rorr_ci_lower = []
-rorr_ci_upper = []
-
-# 交差検証ループ
-for train_index, test_index in kf.split(df):
-    df_train = df.iloc[train_index]
-    df_test = df.iloc[test_index]
-
-    # アウトカムモデル y ~ x1 + x2 + x3 (学習データを基に再学習)
-    g_model = RandomForestRegressor(n_estimators=50, random_state=42)
-    g_model.fit(df_train[covariate_cols], df_train['y'])
-
-    # 介入モデル t ~ x1 + x2 + x3 (学習データを基に再学習)
-    h_model = LinearRegression()
-    h_model.fit(df_train[covariate_cols], df_train['t'])
-
-    # RORRの推定値を計算 (評価データで実行)
-    coef, _, ci = est2.get_rorr_estimates(df_test, g_model, h_model)
-
-    rorr_coefs.append(coef)
-    rorr_ci_lower.append(ci[0])
-    rorr_ci_upper.append(ci[1])
-
-# 結果の集計
-mean_coef = np.mean(rorr_coefs)
-mean_ci_lower = np.mean(rorr_ci_lower)
-mean_ci_upper = np.mean(rorr_ci_upper)
+# RORRの推定値を計算
+coef, se, ci = est2.get_rorr_estimates(df, g_model, h_model)
 
 # 結果の表示
-results_rorr_cv = [[len(df), mean_coef, f"({mean_ci_lower:.3f}, {mean_ci_upper:.3f})"]]
-columns_rorr_cv = ["Sample Size", "Mean Empirical RORR (CV)", "Mean RORR CI (CV)"]
-df_rorr_cv = pd.DataFrame(results_rorr_cv, columns=columns_rorr_cv)
-print(df_rorr_cv)
+results_rorr = [[N, coef, f"({ci[0]:.3f}, {ci[1]:.3f})"]]
+columns_rorr = ["Sample Size", "Empirical RORR", "RORR CI"]
+df_rorr = pd.DataFrame(results_rorr, columns=columns_rorr)
+print(df_rorr)
 
 # --- 4. Cross-fitted AIPW のための関数定義 ---
 def crossfit_aipw(df, covariate_cols, outcome_model_class, pscore_model_class, K=5, random_state=42):
     """
     交差適合（Cross-fitting）を用いてAIPW推定量（AIE: Average Incremental Effect）を計算する関数
     """
-    # 介入tの値ごとにK個以上のサンプルがない場合、そのデータは除外
     t_counts = df['t'].value_counts()
     valid_t = t_counts[t_counts >= K].index
     df_filtered = df[df['t'].isin(valid_t)].copy()
@@ -142,27 +99,21 @@ def crossfit_aipw(df, covariate_cols, outcome_model_class, pscore_model_class, K
     
     print(f"Original size: {len(df)}, Filtered size for cross-fitting: {len(df_filtered)}")
 
-    # K-分割交差検証
     for train_idx, test_idx in kf.split(df_filtered, df_filtered['t']):
         df_train, df_test = df_filtered.iloc[train_idx], df_filtered.iloc[test_idx]
         
-        # 傾向スコアモデルの学習（分割した一方のデータで）
         pscore_model = pscore_model_class(max_iter=1000)
         pscore_model.fit(df_train[covariate_cols], df_train.t)
         
-        # アウトカムモデルの学習（分割した一方のデータで）
         outcome_model = outcome_model_class()
-        # アウトカムモデルは共変量Xと介入Tの両方を使ってyを予測
         X_aug_train = pd.concat([df_train[covariate_cols], df_train['t']], axis=1)
         outcome_model.fit(X_aug_train, df_train.y)
         
-        # AIPWの計算（もう一方のデータで）
-        aipw_matrix = est2.estimate_aipw_matrix(df_test, outcome_model, pscore_model, t_max=max_t)
+        aipw_matrix = est2.get_aipw_matrix(df_test, outcome_model, pscore_model, t_max=max_t)
         all_influences.append(aipw_matrix)
     
     aipw_matrix_full = pd.concat(all_influences, axis=0).sort_index()
 
-    # AIE (Average Incremental Effect) の計算
     T_max = aipw_matrix_full.shape[1] - 1
     c = np.zeros(T_max + 1)
     
@@ -180,16 +131,28 @@ def crossfit_aipw(df, covariate_cols, outcome_model_class, pscore_model_class, K
 
 # --- 5. Cross-fitted AIPW 推定の実行 ---
 print("\n--- Running Cross-Fitted AIPW Estimation ---")
-# AIPW推定量の計算
 estimate_crossfit, se_crossfit, ci_crossfit = crossfit_aipw(
     df,
-    covariate_cols, # 共変量を指定
+    covariate_cols, 
     outcome_model_class=lambda: RandomForestRegressor(n_estimators=50, random_state=42),
     pscore_model_class=LogisticRegression
 )
 
-# 結果の表示（Target列は削除）
+# 結果の表示
 results_aie_cf = [[N, estimate_crossfit, f"({ci_crossfit[0]:.3f},{ci_crossfit[1]:.3f})"]]
 columns_aie_cf = ["Sample Size", "Empirical AIE (Cross-fit)", "AIE CI"]
 df_aie_cf = pd.DataFrame(results_aie_cf, columns=columns_aie_cf)
+print(df_aie_cf)
+
+# --- 6. 傾向スコア重み付けによるバランスチェック ---
+print("\n--- Checking Balance with Inverse Propensity Score Weighting (IPW) ---")
+pscore_model = LogisticRegression(max_iter=1000)
+pscore_model.fit(df[covariate_cols], df['t'])
+smd_before, smd_after, ipw = est2.check_balance(df, pscore_model)
+
+print(f"Standardized Mean Difference (SMD) before weighting: {smd_before:.3f}")
+print(f"Standardized Mean Difference (SMD) after weighting: {smd_after:.3f}")
+
+print("\n--- Final Results ---")
+print(df_rorr)
 print(df_aie_cf)
