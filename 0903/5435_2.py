@@ -305,7 +305,79 @@ print(f"[WLS ATU]       effect={wls_atu:.4f}, p={wls_atu_p:.4g}, 95% CI=({wls_at
 print("\n--- 参考: Foldごとのばらつき ---")
 print(f"[Fold別ATE]     mean={fold_ate_mean:.4f}, 95% range=({fold_ate_range[0]:.4f}, {fold_ate_range[1]:.4f})")
 print("="*60)
+# --- SMD計算用の関数を定義 ---
+def compute_smd(df, covariates, treatment_col, weights=None):
+    """指定された重みでSMDを計算する"""
+    smd_list = []
+    
+    # 介入群と対照群のインデックスを取得
+    treat_idx = df[treatment_col] == 1
+    control_idx = df[treatment_col] == 0
+    
+    for cov in covariates:
+        # 介入群と対照群のデータを抽出
+        treat_data = df.loc[treat_idx, cov]
+        control_data = df.loc[control_idx, cov]
+        
+        if weights is None:
+            # 重みなしの場合
+            mean_treat = treat_data.mean()
+            mean_control = control_data.mean()
+            var_treat = treat_data.var(ddof=1)
+            var_control = control_data.var(ddof=1)
+        else:
+            # 重みありの場合
+            w_treat = weights[treat_idx]
+            w_control = weights[control_idx]
+            
+            mean_treat = np.average(treat_data, weights=w_treat)
+            mean_control = np.average(control_data, weights=w_control)
+            var_treat = np.average((treat_data - mean_treat)**2, weights=w_treat)
+            var_control = np.average((control_data - mean_control)**2, weights=w_control)
+            
+        # SMDの計算
+        pooled_std = np.sqrt((var_treat + var_control) / 2)
+        smd = (mean_treat - mean_control) / pooled_std
+        smd_list.append(smd)
+        
+    return smd_list
 
+# --- SMDの計算を実行 ---
+# 1. 重み付けなし (補正前)
+smd_unweighted = compute_smd(df, covariate_cols, 't')
+
+# 2. IPWによる重み付けあり (補正後)
+ps_clipped = np.clip(df['ps_oof'], 0.05, 0.95)
+ipw_weights = np.where(df['t'] == 1, 1 / ps_clipped, 1 / (1 - ps_clipped))
+smd_weighted = compute_smd(df, covariate_cols, 't', weights=ipw_weights)
+
+# --- 結果をDataFrameにまとめる ---
+smd_df = pd.DataFrame({
+    'Unweighted': smd_unweighted,
+    'IPW Weighted': smd_weighted
+}, index=covariate_cols)
+
+
+# --- SMDの可視化 (Loveプロット) ---
+plt.style.use('seaborn-v0_8-whitegrid')
+fig, ax = plt.subplots(figsize=(10, 8))
+
+# ポイントをプロット
+ax.scatter(smd_df['Unweighted'], smd_df.index, color='orange', label='Unweighted', alpha=0.8)
+ax.scatter(smd_df['IPW Weighted'], smd_df.index, color='blue', label='IPW Weighted', alpha=0.8)
+
+# 基準となる垂直線を追加
+ax.axvline(0, color='grey', linestyle='-')
+ax.axvline(0.1, color='black', linestyle='--', label='SMD=0.1 基準')
+ax.axvline(-0.1, color='black', linestyle='--')
+
+# グラフの体裁を整える
+ax.set_xlabel("Standardized Mean Difference (SMD)")
+ax.set_ylabel("Covariates")
+ax.set_title("Covariate Balance Before & After IPW Weighting")
+ax.legend()
+plt.tight_layout()
+plt.show()
 # # --- チューニング用のパラメータグリッドを定義 ---
 # param_grid_ps = {
 #     'C': [0.1, 1, 10],
