@@ -56,22 +56,35 @@ def compute_ocd(num_strata):
 #     return coef, se, [lwr, upr]
 
 
-def get_rorr_estimates(data, g_model, h_model):
-    """Residual-on-Residual Regression (RORR) with sklearn-style models."""
-    covariate_cols = [col for col in data.columns if col.startswith('x')]
+def get_rorr_estimates(data, g_model, h_model, covariate_cols):
+    """
+    Residual-on-Residual Regression (RORR) with sklearn-style models.
+    
+    Parameters:
+    - data: DataFrame with columns 'y', 't', and covariates
+    - g_model: sklearn model trained to predict Y from X (E[Y|X])
+    - h_model: sklearn model trained to predict T from X (E[T|X])
+    - covariate_cols: List of strings specifying the names of the covariate columns.
+    
+    Returns:
+    - (coef, se, [lwr, upr]): coefficient, std.error, and 95% CI
+    """
     X = data[covariate_cols]
     
+    # Predict residuals
     g_hat = g_model.predict(X)
     h_hat = h_model.predict(X)
     
+    # Calculate residuals
     y_hat = data['y'].to_numpy() - g_hat
     t_hat = data['t'].to_numpy() - h_hat
     
+    # Residual-on-residual regression
     fit = OLS(y_hat, add_constant(t_hat)).fit()
     
+    # Get coefficients, SE, and CI
     coef = fit.params[1]
     se = fit.bse[1]
-    # ★★★ FIX: Use NumPy indexing instead of .iloc ★★★
     lwr, upr = fit.conf_int()[1]
         
     return coef, se, [lwr, upr]
