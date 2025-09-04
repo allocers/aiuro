@@ -102,6 +102,43 @@ plt.title('Correlation Matrix of Covariates', fontsize=16)
 plt.savefig('correlation_matrix.png')
 print("共変量間の相関ヒートマップを 'correlation_matrix.png' として保存しました。")
 # plt.show()
+# --- アウトカムと共変量の相関を計算 ---
+# 相関を計算したいカラムのリストを作成
+cols_for_corr = covariate_cols + ['y']
+
+# 相関行列を計算
+correlation_with_outcome = df[cols_for_corr].corr()
+
+# アウトカム 'y' と各共変量との相関のみを抽出
+corr_y = correlation_with_outcome['y'].drop('y') # 自分自身との相関は除外
+
+# 相関の強さでソート
+corr_y_sorted = corr_y.sort_values(ascending=False)
+
+print("\n--- アウトカム(y)と共変量の相関係数 ---")
+print(corr_y_sorted)
+
+
+# --- 相関を可視化 ---
+plt.style.use('seaborn-v0_8-whitegrid')
+plt.figure(figsize=(12, 8))
+
+# Seabornのbarplotを使用して可視化
+sns.barplot(x=corr_y_sorted.values, y=corr_y_sorted.index, palette='coolwarm')
+
+# グラフのタイトルとラベルを設定
+plt.title('Correlation between Covariates and Outcome (y)', fontsize=16)
+plt.xlabel('Correlation Coefficient')
+plt.ylabel('Covariates')
+plt.axvline(0, color='black', linewidth=0.8) # ゼロ相関の線を追加
+plt.tight_layout()
+
+# 画像として保存
+plt.savefig('outcome_correlation.png')
+print("\nアウトカムと共変量の相関グラフを 'outcome_correlation.png' として保存しました。")
+
+# グラフを表示
+plt.show()
 
 # # Standardize the specified columns
 scaler = StandardScaler()
